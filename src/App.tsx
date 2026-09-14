@@ -22,35 +22,41 @@ export default function App(){
   const dest=useRef<MediaStreamAudioDestinationNode|null>(null); const recR=useRef<MediaRecorder|null>(null);
   const cA=useRef<HTMLCanvasElement>(null); const cB=useRef<HTMLCanvasElement>(null);
   const xRef=useRef<HTMLDivElement>(null); const drag=useRef(false);
+useEffect(()=>{
+  if(ctxRef.current) return;
+  const ctx=new (window.AudioContext||(window as any).webkitAudioContext)();
+  ctxRef.current=ctx as any;
+  const mk=(t:BiquadFilterType,f:number)=>{ const n=ctx.createBiquadFilter(); n.type=t; n.frequency.value=f; return n; };
+  fAL.current=mk('lowshelf',320); fAM.current=mk('peaking',1000); fAH.current=mk('highshelf',3200);
+  fBL.current=mk('lowshelf',320); fBM.current=mk('peaking',1000); fBH.current=mk('highshelf',3200);
 
-  useEffect(()=>{
-    if(ctxRef.current) return;
-    const ctx=new (window.AudioContext||(window as any).webkitAudioContext)(); ctxRef.current=ctx;
-    const mk=(t:BiquadFilterType,f:number)=>{ const n=ctx.createBiquadFilter(); n.type=t; n.frequency.value=f; if(t==='peaking') n.Q.value=1; return n; };
-    fAL.current=mk('lowshelf',320); fAM.current=mk('peaking',1000); fAH.current=mk('highshelf',3200);
-    fBL.current=mk('lowshelf',320); fBM.current=mk('peaking',1000); fBH.current=mk('highshelf',3200);
-    gA.current=ctx.createGain(); gB.current=ctx.createGain();
-    masterGain.current=ctx.createGain(); cueBusGain.current=ctx.createGain();
-    masterGain.current.gain.value=masterVol/100; cueBusGain.current.gain.value=cueVol/100;
-    anA.current=ctx.createAnalyser(); anB.current=ctx.createAnalyser(); anA.current.fftSize=256; anB.current.fftSize=256;
-    dest.current=ctx.createMediaStreamDestination();
-    // Chain: source -> EQ -> channelGain -> MASTER GAIN -> analyser -> destination
-    // Also channelGain -> CUE BUS (independent)
-    fAL.current.connect(fAM.current!); fAM.current!.connect(fAH.current!); fAH.current!.connect(gA.current!);
-    fBL.current.connect(fBM.current!); fBM.current!.connect(fBH.current!); fBH.current!.connect(gB.current!);
-    gA.current!.connect(masterGain.current!); gB.current!.connect(masterGain.current!);
-    masterGain.current!.connect(anA.current!); // master analyser reused for master out
-    // CUE bus taps pre-master, post EQ
-    // We'll use an extra gain for cue: gA and gB also feed cueBusGain when pfl on
-    // Simplified: gA -> cueBusGain (volume controlled separately)
-    gA.current!.connect(cueBusGain.current!); gB.current!.connect(cueBusGain.current!);
-    anA.current!.connect(ctx.destination); // master to speakers
-    // For visualisation B we duplicate analyser from master? Use second analyser from cueBus for B vis
-    anB.current!.connect(ctx.destination);
-    cueBusGain.current!.connect(anB.current!); // cue bus visible on B analyser when pfl active
-    masterGain.current!.connect(dest.current!); // REC records ONLY MASTER, not cueBus (pro!)
-    setTimeout(()=>{ try{ if(aRef.current){ const s=ctx.createMediaElementSource(aRef.current); s.connect(fAL.current!); } if(bRef.current){ const s=ctx.createMediaElementSource(bRef.current); s.connect(fBL.current!); } }catch{} },600);
-  },[]);
+  gA.current=ctx.createGain(); gB.current=ctx.createGain();
+  masterGain.current=ctx.createGain(); cueBusGain.current=ctx.createGain();
+  anA.current=ctx.createAnalyser(); anB.current=ctx.createAnalyser();
+  dest.current=ctx.createMediaStreamDestination();
+
+  anA.current.fftSize=256; anB.current.fftSize=256;
+
+  // CHAIN CORRIGIDO: source -> EQ -> ANALYSER DO DECK -> GAIN DO CANAL -> MASTER/CUE
+  fAL.current.connect(fAM.current!); fAM.current!.connect(fAH.current!);
+  fAH.current!.connect(anA.current!); // <- analysyer do DECK A ANTES do gain
+  anA.current!.connect(gA.current!);
+
+  fBL.current.connect(fBM.current!); fBM.current!.connect(fBH.current!);
+  fBH.current!.connect(anB.current!); // <- analyser do DECK B ANTES do gain
+  anB.current!.connect(gB.current!);
+
+  gA.current!.connect(masterGain.current!); gB.current!.connect(masterGain.current!);
+  gA.current!.connect(cueBusGain.current!); gB.current!.connect(cueBusGain.current!);
+
+  masterGain.current!.connect(ctx.destination);
+  masterGain.current!.connect(dest.current!);
+  cueBusGain.current!.connect(ctx.destination);
+
+  masterGain.current.gain.value=masterVol/100; cueBusGain.current.gain.value=cueVol/100;
+
+  setTimeout(()=>{ try{ if(aRef.current){ const s=ctx.createMediaElementSource(aRef.current); s.connect(fAL.current!); } if(bRef.current){ const s2=ctx.createMediaElementSource(bRef.current); s2.connect(fBL.current!); } }catch{} },500);
+},[]);
 
   useEffect(()=>{ if(masterGain.current) masterGain.current.gain.value=masterVol/100; },[masterVol]);
   useEffect(()=>{ if(cueBusGain.current) cueBusGain.current.gain.value=cueVol/100; },[cueVol]);
@@ -81,19 +87,27 @@ export default function App(){
     },120); return()=>clearInterval(id);
   },[deckA.playing,deckB.playing,rec]);
 
-  useEffect(()=>{
-    let raf:number; const draw=()=>{
-      raf=requestAnimationFrame(draw);
-      const dc=(can:HTMLCanvasElement|null,an:AnalyserNode|null,col:string, elapsed:number, dur:number, cue:number|null)=>{
-        if(!can||!an) return; const ctx=can.getContext('2d')!; const w=can.width, h=can.height; const data=new Uint8Array(an.frequencyBinCount); an.getByteFrequencyData(data);
-        ctx.clearRect(0,0,w,h); ctx.fillStyle='rgba(255,255,255,0.04)'; for(let i=0;i<w;i+=24) ctx.fillRect(i,0,1,h);
-        const bw=w/data.length*2.2; let x=0; for(let i=0;i<data.length;i++){ const bh=data[i]/255*h*0.85; ctx.fillStyle=col; ctx.fillRect(x,h-bh,bw,bh); x+=bw+1; }
-        if(dur>0){ const p=elapsed/dur; ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.fillRect(p*w,0,2,h); ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fillRect(0,h-4,w,4); ctx.fillStyle=col; ctx.fillRect(0,h-4,p*w,4); }
-        if(cue!==null && dur>0){ const cx=(cue/dur)*w; ctx.fillStyle='#FF8A00'; ctx.fillRect(cx,0,2,h); ctx.beginPath(); ctx.moveTo(cx-6,0); ctx.lineTo(cx+6,0); ctx.lineTo(cx,10); ctx.fill(); }
-        const remain=dur-elapsed; if(dur>0 && remain<30 && remain>0){ ctx.fillStyle= remain<10?'rgba(255,0,0,0.25)':'rgba(255,200,0,0.18)'; ctx.fillRect(0,0,w,h); }
-      }; dc(cA.current,anA.current,deckA.track.color, deckA.elapsed, deckA.duration, deckA.cuePoint); dc(cB.current,anB.current,deckB.track.color, deckB.elapsed, deckB.duration, deckB.cuePoint);
-    }; draw(); return()=>cancelAnimationFrame(raf);
-  },[deckA, deckB]);
+ useEffect(()=>{
+  let raf:number;
+  const drawDeck=(can:HTMLCanvasElement|null, an:AnalyserNode|null, deck:Deck, color:string)=>{
+    if(!can||!an) return;
+    const ctx=can.getContext('2d')!;
+    const w=can.width, h=can.height;
+    ctx.clearRect(0,0,w,h);
+    if(!deck.playing){
+      ctx.fillStyle=color+'44'; ctx.fillRect(0,h/2-1,w,2);
+      return; // CONGELA quando pausado
+    }
+    const data=new Uint8Array(an.frequencyBinCount);
+    an.getByteFrequencyData(data);
+    ctx.fillStyle=color;
+    const bw=w/data.length*2.2; let x=0;
+    for(let i=0;i<data.length;i++){ const bh=(data[i]/255)*h*0.9; ctx.fillRect(x,h-bh,bw,bh); x+=bw+1; }
+    if(deck.duration>0){ ctx.fillStyle='#fff8'; ctx.fillRect(0,h-4,(deck.elapsed/deck.duration)*w,4); }
+  };
+  const loop=()=>{ drawDeck(cA.current, anA.current, deckA, deckA.track.color); drawDeck(cB.current, anB.current, deckB, deckB.track.color); raf=requestAnimationFrame(loop); };
+  loop(); return()=>cancelAnimationFrame(raf);
+},[deckA, deckB, deckA.playing, deckB.playing, deckA.elapsed, deckB.elapsed]);
 
   const up=(e:React.ChangeEvent<HTMLInputElement>, which:'A'|'B')=>{
     const f=e.target.files?.[0]; if(!f) return; const url=URL.createObjectURL(f);
